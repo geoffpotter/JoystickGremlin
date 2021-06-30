@@ -156,6 +156,7 @@ class Axis:
         self.vjoy_id = vjoy_dev.vjoy_id
         self.axis_id = axis_id
         self._value = 0.0
+        self.values = list()
 
         # Retrieve axis minimum and maximum values
         tmp = ctypes.c_ulong()
@@ -476,7 +477,7 @@ class VJoy:
         if not VJoyInterface.vJoyEnabled():
             logging.getLogger("system").error("vJoy is not currently running")
             raise VJoyError("vJoy is not currently running")
-        if VJoyInterface.GetvJoyVersion() != 0x218:
+        if VJoyInterface.GetvJoyVersion() != 0x219:
             logging.getLogger("system").error(
                 "Running incompatible vJoy version, 2.1.8 required"
             )
@@ -612,7 +613,7 @@ class VJoy:
 
         return self._axis_lookup[linear_index]
 
-    def axis(self, axis_id=None, linear_index=None):
+    def axis(self, axis_id=None, linear_index=None) -> Axis:
         """Returns the axis object associated with the provided index.
 
         :param axis_id actual id of the axis which may not be contiguous

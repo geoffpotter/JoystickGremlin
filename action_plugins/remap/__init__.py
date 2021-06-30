@@ -31,6 +31,20 @@ from gremlin.profile import safe_format, safe_read
 import gremlin.ui.common
 import gremlin.ui.input_item
 
+#this defines both display and execution order
+ #removed
+ # "avg"       : "Combine(Avg)",
+modes = {
+        "Default(Always override)" : "direct",
+        "Combine Multiple(Sum)" : "sum",
+        "Isolate Highest(Max)" : "max",
+        "Limiter+Input Scaling(Mul)" : "mul",
+        "Limiter(Min)" : "min",
+        "Combine Multiple, no Limiter(Sum)" : "sum",
+        "If Not 0, Override" : "notZero",
+        "If Not 1, Override" : "notOne",
+        "If Not -1, Override" : "notNegOne",
+}
 
 class RemapWidget(gremlin.ui.input_item.AbstractActionWidget):
 
@@ -59,6 +73,8 @@ class RemapWidget(gremlin.ui.input_item.AbstractActionWidget):
         """
         super().__init__(action_data, parent=parent)
         assert(isinstance(action_data, Remap))
+
+        
 
     def _create_ui(self):
         """Creates the UI components."""
@@ -101,6 +117,14 @@ class RemapWidget(gremlin.ui.input_item.AbstractActionWidget):
             self.remap_type_layout.addWidget(self.relative_checkbox)
             self.remap_type_layout.addWidget(self.relative_scaling)
             self.remap_type_layout.addWidget(QtWidgets.QLabel("Scale"))
+            
+            self.remap_type_layout.addStretch()
+            self.map_mode_combobox = QtWidgets.QComboBox()
+            
+            for key in modes:
+                self.map_mode_combobox.addItem(key, modes[key])
+            self.remap_type_layout.addWidget(self.map_mode_combobox)
+            self.remap_type_layout.addWidget(QtWidgets.QLabel("Map Mode"))
 
             self.remap_type_widget.hide()
             self.main_layout.addWidget(self.remap_type_widget)
@@ -155,6 +179,10 @@ class RemapWidget(gremlin.ui.input_item.AbstractActionWidget):
                     self.relative_checkbox.setChecked(True)
                 self.relative_scaling.setValue(self.action_data.axis_scaling)
 
+                mapMode = str(self.action_data.map_mode or "direct")
+                self.map_mode_combobox.setCurrentText(mapMode)
+                
+                self.map_mode_combobox.currentTextChanged.connect(self.save_changes)
                 self.absolute_checkbox.clicked.connect(self.save_changes)
                 self.relative_checkbox.clicked.connect(self.save_changes)
                 self.relative_scaling.valueChanged.connect(self.save_changes)
@@ -185,7 +213,7 @@ class RemapWidget(gremlin.ui.input_item.AbstractActionWidget):
                 if self.relative_checkbox.isChecked():
                     self.action_data.axis_mode = "relative"
                 self.action_data.axis_scaling = self.relative_scaling.value()
-
+                self.action_data.map_mode = self.map_mode_combobox.currentText()
             # Signal changes
             if input_type_changed:
                 self.action_modified.emit()
@@ -204,6 +232,9 @@ class RemapFunctor(gremlin.base_classes.AbstractFunctor):
         self.input_type = action.input_type
         self.axis_mode = action.axis_mode
         self.axis_scaling = action.axis_scaling
+        self.map_mode = action.map_mode
+        self.map_index = None
+        self.map_data = dict()
 
         self.needs_auto_release = self._check_for_auto_release(action)
         self.thread_running = False
@@ -213,11 +244,103 @@ class RemapFunctor(gremlin.base_classes.AbstractFunctor):
         self.axis_delta_value = 0.0
         self.axis_value = 0.0
 
+
+    def merge_inputs(self, last_modified_index):
+        values = joystick_handling.VJoyProxy()[self.vjoy_device_id] \
+                    .axis(self.vjoy_input_id).values
+        groupNames = modes.keys()
+        groupedValues = dict()
+        for groupName in groupNames:
+            groupedValues[groupName] = []
+            for value in values:
+                if value["mode"] == groupName:
+                    groupedValues[groupName].append(value["last_value"])
+        #newlist = {[y["last_value"] for y in values if y["mode"]==x] for x in groupNames}
+        logging.getLogger("system").debug(str(groupNames))
+        logging.getLogger("system").debug(str(groupedValues))
+        lastOperationsValue = 0
+    #"notZero"   : "If Not 0, Override",
+    #"notOne"    : "If Not 1, Override",
+    #"notNegOne" : "If Not -1, Override",
+        for groupName in groupNames:
+            controlValues = groupedValues[groupName]
+            controlValues.append(lastOperationsValue)
+            groupFunction = modes[groupName]
+            if not controlValues:
+                continue
+
+            logging.getLogger("system").debug(str(groupName) + str(controlValues))
+            if groupFunction == "direct":#wrong... fuck.
+                # if values[last_modified_index]["mode"] == "direct":
+                #     lastOperationsValue = values[last_modified_index]["last_value"]
+                maxValue = 0
+                for val in controlValues:
+                    if abs(val) > abs(maxValue):
+                        maxValue = val
+                lastOperationsValue = maxValue
+            elif groupFunction == "mul":
+                result = 1
+                for val in controlValues:
+                    result = result * val
+                lastOperationsValue = result
+            elif groupFunction == "min":
+                minValue = 100
+                for val in controlValues:
+                    if abs(val) < abs(minValue):
+                        minValue = val
+                if minValue == 100:
+                    minValue = 0
+                lastOperationsValue = minValue
+            elif groupFunction == "max":
+                maxValue = 0
+                for val in controlValues:
+                    if abs(val) > abs(maxValue):
+                        maxValue = val
+                lastOperationsValue = maxValue
+            elif groupFunction == "sum":
+                lastOperationsValue = sum(controlValues)
+            elif groupFunction == "avg":
+                lastOperationsValue = sum(controlValues) / len(controlValues)
+            elif groupFunction == "notZero":
+                for value in reversed(controlValues):
+                    if value != 0:
+                        lastOperationsValue = value
+            elif groupFunction == "notOne":
+                for value in reversed(controlValues):
+                    if value != 1:
+                        lastOperationsValue = value
+            elif groupFunction == "notNegOne":
+                for value in reversed(controlValues):
+                    if value != -1:
+                        lastOperationsValue = value
+            
+            logging.getLogger("system").debug(str(groupName + " Done.") + str(lastOperationsValue))
+              
+        logging.getLogger("system").debug(str("done:") + str(lastOperationsValue))
+        joystick_handling.VJoyProxy()[self.vjoy_device_id] \
+            .axis(self.vjoy_input_id).value = gremlin.util.clamp(lastOperationsValue, -1.0, 1.0)
+
     def process_event(self, event, value):
+
         if self.input_type == InputType.JoystickAxis:
+            values = joystick_handling.VJoyProxy()[self.vjoy_device_id] \
+                    .axis(self.vjoy_input_id).values
+            if self.map_index == None:
+                self.map_index = len(values)
+                self.map_data["mode"] = self.map_mode
+                self.map_data["last_value"] = value.current
+                values.append(self.map_data)
+
             if self.axis_mode == "absolute":
-                joystick_handling.VJoyProxy()[self.vjoy_device_id] \
-                    .axis(self.vjoy_input_id).value = value.current
+                
+                if self.map_mode == "Default(Always override)":
+                    joystick_handling.VJoyProxy()[self.vjoy_device_id] \
+                     .axis(self.vjoy_input_id).value = value.current
+                else:
+                    self.map_data["last_value"] = value.current
+                    self.merge_inputs(self.map_index)
+                # joystick_handling.VJoyProxy()[self.vjoy_device_id] \
+                #     .axis(self.vjoy_input_id).value = value.current
             else:
                 self.should_stop_thread = abs(event.value) < 0.05
                 self.axis_delta_value = \
@@ -267,8 +390,12 @@ class RemapFunctor(gremlin.base_classes.AbstractFunctor):
                     -1.0,
                     min(1.0, self.axis_value + self.axis_delta_value)
                 )
-                vjoy_dev.axis(self.vjoy_input_id).value = self.axis_value
-
+                if self.map_mode == "Default(Always override)":
+                  vjoy_dev.axis(self.vjoy_input_id).value = self.axis_value
+                else:
+                    self.map_data["last_value"] = self.axis_value
+                    self.merge_inputs(self.map_index)
+                
                 if self.should_stop_thread and \
                         self.thread_last_update + 1.0 < time.time():
                     self.thread_running = False
@@ -329,6 +456,7 @@ class Remap(gremlin.base_classes.AbstractAction):
         self.input_type = self.parent.parent.input_type
         self.axis_mode = "absolute"
         self.axis_scaling = 1.0
+        self.map_mode = "direct"
 
     def icon(self):
         """Returns the icon corresponding to the remapped input.
@@ -397,6 +525,7 @@ class Remap(gremlin.base_classes.AbstractAction):
             if self.get_input_type() == InputType.JoystickAxis and \
                     self.input_type == InputType.JoystickAxis:
                 self.axis_mode = safe_read(node, "axis-type", str, "absolute")
+                self.map_mode = safe_read(node, "map-mode", str, "direct")
                 self.axis_scaling = safe_read(node, "axis-scaling", float, 1.0)
         except ProfileError:
             self.vjoy_input_id = None
@@ -423,6 +552,7 @@ class Remap(gremlin.base_classes.AbstractAction):
         if self.get_input_type() == InputType.JoystickAxis and \
                 self.input_type == InputType.JoystickAxis:
             node.set("axis-type", safe_format(self.axis_mode, str))
+            node.set("map-mode", safe_format(self.map_mode, str))
             node.set("axis-scaling", safe_format(self.axis_scaling, float))
 
         return node
